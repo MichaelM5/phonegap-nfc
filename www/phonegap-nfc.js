@@ -10,7 +10,7 @@ function handleNfcFromIntentFilter() {
     // addConstructor was finishing *before* deviceReady was complete and the
     // ndef listeners had not been registered.
     // It seems like there should be a better solution.
-    if (cordova.platformId === "android" || cordova.platformId === "windows") {
+    if (cordova.platformId === "android") {
         setTimeout(
             function () {
                 cordova.exec(
@@ -195,7 +195,7 @@ var ndef = {
      * http://developer.android.com/guide/topics/connectivity/nfc/nfc.html#aar
      *
      */
-    androidApplicationRecord: function(packageName) {
+    androidApplicationRecord: function (packageName) {
         return ndef.record(ndef.TNF_EXTERNAL_TYPE, "android.com:pkg", [], packageName);
     },
 
@@ -495,6 +495,23 @@ var nfc = {
     // iOS only
     invalidateSession: function (win, fail) {
         cordova.exec(win, fail, "NfcPlugin", "invalidateSession", []);
+    },
+
+    // APDU
+    connect: function (callback, win, fail) {
+        document.addEventListener("nfc-connected", callback, false);
+        cordova.exec(win, fail, "NfcPlugin", "connect", []);
+    },
+
+    // APDU
+    close: function (callback, win, fail) {
+        document.removeEventListener("nfc-connected", callback, false);
+        cordova.exec(win, fail, "NfcPlugin", "close", []);
+    },
+
+    // APDU
+    transceive: function (data, win, fail) {
+        cordova.exec(win, fail, "NfcPlugin", "transceive", [data]);
     }
 
 };
@@ -527,82 +544,30 @@ var util = {
         }
     },
 
-    bytesToString: function(bytes) {
-        // based on http://ciaranj.blogspot.fr/2007/11/utf8-characters-encoding-in-javascript.html
-
-        var result = "";
-        var i, c, c1, c2, c3;
-        i = c = c1 = c2 = c3 = 0;
-
-        // Perform byte-order check.
-        if( bytes.length >= 3 ) {
-            if( (bytes[0] & 0xef) == 0xef && (bytes[1] & 0xbb) == 0xbb && (bytes[2] & 0xbf) == 0xbf ) {
-                // stream has a BOM at the start, skip over
-                i = 3;
-            }
+    bytesToString: function (bytes) {
+        var bytesAsString = "";
+        for (var i = 0; i < bytes.length; i++) {
+            bytesAsString += String.fromCharCode(bytes[i]);
         }
-
-        while ( i < bytes.length ) {
-            c = bytes[i] & 0xff;
-
-            if ( c < 128 ) {
-
-                result += String.fromCharCode(c);
-                i++;
-
-            } else if ( (c > 191) && (c < 224) ) {
-
-                if ( i + 1 >= bytes.length ) {
-                    throw "Un-expected encoding error, UTF-8 stream truncated, or incorrect";
-                }
-                c2 = bytes[i + 1] & 0xff;
-                result += String.fromCharCode( ((c & 31) << 6) | (c2 & 63) );
-                i += 2;
-
-            } else {
-
-                if ( i + 2 >= bytes.length  || i + 1 >= bytes.length ) {
-                    throw "Un-expected encoding error, UTF-8 stream truncated, or incorrect";
-                }
-                c2 = bytes[i + 1] & 0xff;
-                c3 = bytes[i + 2] & 0xff;
-                result += String.fromCharCode( ((c & 15) << 12) | ((c2 & 63) << 6) | (c3 & 63) );
-                i += 3;
-
-            }
-        }
-        return result;
+        return bytesAsString;
     },
 
-    stringToBytes: function(string) {
-        // based on http://ciaranj.blogspot.fr/2007/11/utf8-characters-encoding-in-javascript.html
-
-        var bytes = [];
-
-        for (var n = 0; n < string.length; n++) {
-
-            var c = string.charCodeAt(n);
-
-            if (c < 128) {
-
-                bytes[bytes.length]= c;
-
-            } else if((c > 127) && (c < 2048)) {
-
-                bytes[bytes.length] = (c >> 6) | 192;
-                bytes[bytes.length] = (c & 63) | 128;
-
-            } else {
-
-                bytes[bytes.length] = (c >> 12) | 224;
-                bytes[bytes.length] = ((c >> 6) & 63) | 128;
-                bytes[bytes.length] = (c & 63) | 128;
-
-            }
-
+    // http://stackoverflow.com/questions/1240408/reading-bytes-from-a-javascript-string#1242596
+    stringToBytes: function (str) {
+        var ch, st, re = [];
+        for (var i = 0; i < str.length; i++ ) {
+            ch = str.charCodeAt(i);  // get char
+            st = [];                 // set up "stack"
+            do {
+                st.push( ch & 0xFF );  // push byte to stack
+                ch = ch >> 8;          // shift value down by 1 byte
+            } while ( ch );
+            // add stack contents to result
+            // done because chars have "wrong" endianness
+            re = re.concat( st.reverse() );
         }
-
-        return bytes;
+        // return an array of bytes
+        return re;
     },
 
     bytesToHexString: function (bytes) {
@@ -631,7 +596,7 @@ var util = {
      * @tnf 3-bit TNF (Type Name Format) - use one of the TNF_* constants
      * @type byte array or String
      */
-    isType: function(record, tnf, type) {
+    isType: function (record, tnf, type) {
         if (record.tnf === tnf) { // TNF is 3-bit
             var recordType;
             if (typeof(type) === 'string') {
@@ -663,10 +628,12 @@ var textHelper = {
 
     // encode text payload
     // @returns an array of bytes
-    encodePayload: function(text, lang, encoding) {
+    encodePayload: function (text, lang, encoding) {
 
         // ISO/IANA language code, but we're not enforcing
-        if (!lang) { lang = 'en'; }
+        if (!lang) {
+            lang = 'en';
+        }
 
         var encoded = util.stringToBytes(lang + text);
         encoded.unshift(lang.length);
@@ -680,7 +647,7 @@ var textHelper = {
 var uriHelper = {
     // URI identifier codes from URI Record Type Definition NFCForum-TS-RTD_URI_1.0 2006-07-24
     // index in array matches code in the spec
-    protocols: [ "", "http://www.", "https://www.", "http://", "https://", "tel:", "mailto:", "ftp://anonymous:anonymous@", "ftp://ftp.", "ftps://", "sftp://", "smb://", "nfs://", "ftp://", "dav://", "news:", "telnet://", "imap:", "rtsp://", "urn:", "pop:", "sip:", "sips:", "tftp:", "btspp://", "btl2cap://", "btgoep://", "tcpobex://", "irdaobex://", "file://", "urn:epc:id:", "urn:epc:tag:", "urn:epc:pat:", "urn:epc:raw:", "urn:epc:", "urn:nfc:" ],
+    protocols: ["", "http://www.", "https://www.", "http://", "https://", "tel:", "mailto:", "ftp://anonymous:anonymous@", "ftp://ftp.", "ftps://", "sftp://", "smb://", "nfs://", "ftp://", "dav://", "news:", "telnet://", "imap:", "rtsp://", "urn:", "pop:", "sip:", "sips:", "tftp:", "btspp://", "btl2cap://", "btgoep://", "tcpobex://", "irdaobex://", "file://", "urn:epc:id:", "urn:epc:tag:", "urn:epc:pat:", "urn:epc:raw:", "urn:epc:", "urn:nfc:"],
 
     // decode a URI payload bytes
     // @returns a string
@@ -703,7 +670,7 @@ var uriHelper = {
         // check each protocol, unless we've found a match
         // "urn:" is the one exception where we need to keep checking
         // slice so we don't check ""
-        uriHelper.protocols.slice(1).forEach(function(protocol) {
+        uriHelper.protocols.slice(1).forEach(function (protocol) {
             if ((!prefix || prefix === "urn:") && uri.indexOf(protocol) === 0) {
                 prefix = protocol;
             }
@@ -722,7 +689,7 @@ var uriHelper = {
     }
 };
 
-// added since WP8 must call a named function, also used by iOS
+// added since WP8 must call a named function
 // TODO consider switching NFC events from JS events to using the PG callbacks
 function fireNfcTagEvent(eventType, tagAsJson) {
     setTimeout(function () {
